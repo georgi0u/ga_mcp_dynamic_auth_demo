@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.local
+.env.*.local
+
+server/.env
+server/bin/
+server/coverage.out
+
+client/.next/
+client/node_modules/
+client/out/
+
