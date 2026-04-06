@@ -20,7 +20,7 @@ import (
 type Service struct {
 	store  *store.Store
 	crypto *cryptox.Service
-	client *mcpclient.Manager
+	client *mcpclient.Client
 }
 
 type BeginConnectResult struct {
@@ -40,7 +40,7 @@ type ToolDefinition struct {
 func New(
 	store *store.Store,
 	crypto *cryptox.Service,
-	client *mcpclient.Manager,
+	client *mcpclient.Client,
 ) *Service {
 	return &Service{
 		store:  store,
@@ -249,21 +249,8 @@ func (s *Service) BuildToolCatalog(
 			continue
 		}
 
-		for _, tool := range tools {
-			if tool == nil {
-				continue
-			}
-			definition := ToolDefinition{
-				FunctionName:   makeFunctionName(connection.ID, tool.Name),
-				ConnectionID:   connection.ID,
-				ConnectionName: connection.Name,
-				MCPName:        tool.Name,
-				Description:    strings.TrimSpace(tool.Description),
-				Parameters:     parametersForTool(tool),
-			}
-			if definition.Description == "" {
-				definition.Description = fmt.Sprintf("%s via %s", tool.Name, connection.Name)
-			}
+		connectionDefinitions := toolDefinitionsForConnection(connection, tools)
+		for _, definition := range connectionDefinitions {
 			definitions = append(definitions, definition)
 			index[definition.FunctionName] = definition
 		}
@@ -277,6 +264,42 @@ func (s *Service) BuildToolCatalog(
 	})
 
 	return definitions, index, nil
+}
+
+func (s *Service) ListConnectionToolDefinitions(
+	ctx context.Context,
+	connection *store.Connection,
+) ([]ToolDefinition, error) {
+	if connection == nil {
+		return nil, fmt.Errorf("connection is nil")
+	}
+
+	session, err := s.sessionDefinitionFromConnection(connection)
+	if err != nil {
+		return nil, err
+	}
+
+	tools, refreshedTokens, err := s.client.ListTools(ctx, session)
+	if refreshedTokens != nil {
+		if err := s.persistTokenSet(ctx, connection, refreshedTokens); err != nil {
+			return nil, err
+		}
+	}
+	if err != nil {
+		connection.Status = statusFromError(err)
+		connection.LastError = err.Error()
+		_ = s.store.UpdateConnection(ctx, connection)
+		return nil, err
+	}
+
+	definitions := toolDefinitionsForConnection(connection, tools)
+	sort.Slice(definitions, func(i, j int) bool {
+		if definitions[i].MCPName == definitions[j].MCPName {
+			return definitions[i].FunctionName < definitions[j].FunctionName
+		}
+		return definitions[i].MCPName < definitions[j].MCPName
+	})
+	return definitions, nil
 }
 
 func (s *Service) CallTool(
@@ -581,6 +604,32 @@ func parametersForTool(
 	}
 	_ = json.Unmarshal(rawSchema, &parameters)
 	return parameters
+}
+
+func toolDefinitionsForConnection(
+	connection *store.Connection,
+	tools []*mcp.Tool,
+) []ToolDefinition {
+	definitions := make([]ToolDefinition, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+
+		definition := ToolDefinition{
+			FunctionName:   makeFunctionName(connection.ID, tool.Name),
+			ConnectionID:   connection.ID,
+			ConnectionName: connection.Name,
+			MCPName:        tool.Name,
+			Description:    strings.TrimSpace(tool.Description),
+			Parameters:     parametersForTool(tool),
+		}
+		if definition.Description == "" {
+			definition.Description = fmt.Sprintf("%s via %s", tool.Name, connection.Name)
+		}
+		definitions = append(definitions, definition)
+	}
+	return definitions
 }
 
 func applyServerToConnection(

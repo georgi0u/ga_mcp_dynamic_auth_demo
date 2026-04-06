@@ -325,6 +325,25 @@ button {
   background: rgba(255, 255, 255, 0.76);
 }
 
+.connection-card.interactive {
+  cursor: pointer;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.connection-card.interactive:hover {
+  transform: translateY(-1px);
+  border-color: rgba(48, 94, 207, 0.22);
+  box-shadow: 0 16px 40px rgba(16, 32, 42, 0.08);
+}
+
+.connection-card.interactive:focus-visible {
+  outline: 2px solid rgba(48, 94, 207, 0.45);
+  outline-offset: 3px;
+}
+
 .connection-card h3 {
   margin: 0;
   font-size: 0.98rem;
@@ -360,6 +379,61 @@ button {
   width: min(560px, 100%);
   margin: 8vh auto 0;
   padding: 1.5rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(16, 32, 42, 0.34);
+  backdrop-filter: blur(10px);
+}
+
+.modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(920px, 100%);
+  max-height: min(82vh, 760px);
+  overflow: hidden;
+  background: rgba(250, 251, 253, 0.96);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.4rem 1.5rem 1rem;
+  border-bottom: 1px solid rgba(16, 32, 42, 0.08);
+}
+
+.modal-title {
+  font-size: clamp(1.4rem, 2vw, 1.9rem);
+}
+
+.modal-subtitle {
+  margin-top: 0.55rem;
+  color: var(--muted);
+}
+
+.modal-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 1.2rem 1.5rem 1.5rem;
+}
+
+.json-view {
+  margin: 0;
+  padding: 1.1rem 1.2rem;
+  border-radius: 18px;
+  border: 1px solid rgba(16, 32, 42, 0.08);
+  background: rgba(16, 32, 42, 0.96);
+  color: #eef5fb;
+  font: 0.84rem/1.65 "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  overflow: auto;
 }
 
 @media (max-width: 1080px) {
@@ -404,5 +478,18 @@ button {
 
   .message {
     max-width: 100%;
+  }
+
+  .modal-backdrop {
+    padding: 1rem;
+  }
+
+  .modal {
+    max-height: calc(100vh - 2rem);
+  }
+
+  .modal-header {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }

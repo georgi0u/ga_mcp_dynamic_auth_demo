@@ -125,7 +125,7 @@ func TestListToolsFallsBackToLegacySSE(t *testing.T) {
 	}, nil))
 	defer httpServer.Close()
 
-	manager := &Manager{
+	manager := &Client{
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -168,7 +168,7 @@ func TestDynamicRegisterClientOmitsScope(t *testing.T) {
 	}))
 	defer httpServer.Close()
 
-	manager := &Manager{
+	manager := &Client{
 		publicBaseURL: "http://localhost:8080",
 		httpClient:    httpServer.Client(),
 	}

@@ -59,6 +59,7 @@ func (a *App) Routes() http.Handler {
 	mux.HandleFunc("GET /api/bootstrap", a.handleBootstrap)
 	mux.HandleFunc("GET /api/connections", a.handleConnectionsList)
 	mux.HandleFunc("POST /api/connections", a.handleConnectionsCreate)
+	mux.HandleFunc("GET /api/connections/{id}/tools", a.handleConnectionToolsList)
 	mux.HandleFunc("POST /api/connections/{id}/authorize", a.handleConnectionAuthorize)
 	mux.HandleFunc("GET /oauth/callback", a.handleOAuthCallback)
 	mux.HandleFunc("GET /ws", a.handleWebsocket)
@@ -229,7 +230,45 @@ func (a *App) handleConnectionAuthorize(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (a *App) handleConnectionToolsList(w http.ResponseWriter, r *http.Request) {
+	user, _, ok := a.requireAPIUser(w, r)
+	if !ok {
+		return
+	}
+	connectionID := strings.TrimSpace(r.PathValue("id"))
+	if connectionID == "" {
+		writeError(w, http.StatusNotFound, "connection not found")
+		return
+	}
+
+	connection, err := a.store.GetConnectionByID(r.Context(), user.ID, connectionID)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err.Error())
+		return
+	}
+	if connection.Status != "connected" {
+		writeError(w, http.StatusConflict, "connection is not connected")
+		return
+	}
+
+	tools, err := a.mcp.ListConnectionToolDefinitions(r.Context(), connection)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"connection": connection,
+		"tools":      tools,
+	})
+}
+
 func (a *App) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	slog.Info("handling OAuth callback", "query", r.URL.RawQuery)
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	code := strings.TrimSpace(r.URL.Query().Get("code"))
 	oauthErr := strings.TrimSpace(r.URL.Query().Get("error"))

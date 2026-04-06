@@ -53,8 +53,21 @@ export type BeginConnectResponse = {
   authorization_url?: string;
 };
 
+export type ConnectionToolDefinition = {
+  function_name: string;
+  connection_id: string;
+  connection_name: string;
+  mcp_name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+};
+
+export type ConnectionToolsResponse = {
+  connection: Connection;
+  tools: ConnectionToolDefinition[];
+};
+
 export type WebsocketPayload =
   | { type: "chat.message"; message: Message }
   | { type: "chat.status"; status: "idle" | "working" }
   | { type: "chat.error"; error: string };
-

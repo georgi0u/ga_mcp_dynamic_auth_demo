@@ -13,6 +13,8 @@ import type {
   BeginConnectResponse,
   BootstrapResponse,
   Connection,
+  ConnectionToolDefinition,
+  ConnectionToolsResponse,
   LoginResponse,
   WebsocketPayload,
 } from "../lib/types";
@@ -42,6 +44,7 @@ const defaultConnectionForm: ConnectionForm = {
 export function AppShell() {
   const socketRef = useRef<WebSocket | null>(null);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const toolRequestRef = useRef(0);
   const [hydrated, setHydrated] = useState(false);
   const [token, setToken] = useState("");
   const [bootstrap, setBootstrap] = useState<BootstrapResponse | null>(null);
@@ -51,6 +54,10 @@ export function AppShell() {
   const [status, setStatus] = useState<"idle" | "working">("idle");
   const [busy, setBusy] = useState<"" | "login" | "connect" | "send" | "refresh">("");
   const [error, setError] = useState<string | null>(null);
+  const [activeToolsConnection, setActiveToolsConnection] = useState<Connection | null>(null);
+  const [activeToolDefinitions, setActiveToolDefinitions] = useState<ConnectionToolDefinition[] | null>(null);
+  const [activeToolsError, setActiveToolsError] = useState<string | null>(null);
+  const [toolsLoadingConnectionID, setToolsLoadingConnectionID] = useState("");
 
   const deferredMessages = useDeferredValue(bootstrap?.messages ?? []);
 
@@ -146,6 +153,10 @@ export function AppShell() {
     }
     if (!token) {
       setBootstrap(null);
+      setActiveToolsConnection(null);
+      setActiveToolDefinitions(null);
+      setActiveToolsError(null);
+      setToolsLoadingConnectionID("");
       return;
     }
 
@@ -199,6 +210,23 @@ export function AppShell() {
     container.scrollTop = container.scrollHeight;
   }, [deferredMessages.length]);
 
+  useEffect(() => {
+    if (!activeToolsConnection) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeToolDefinitionsModal();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeToolsConnection]);
+
   async function handleLoginSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy("login");
@@ -238,6 +266,7 @@ export function AppShell() {
     setToken("");
     setStatus("idle");
     setError(null);
+    closeToolDefinitionsModal();
   }
 
   async function handleConnectionCreate(event: React.FormEvent<HTMLFormElement>) {
@@ -311,6 +340,48 @@ export function AppShell() {
       }),
     );
     setComposerValue("");
+  }
+
+  function closeToolDefinitionsModal() {
+    toolRequestRef.current += 1;
+    setActiveToolsConnection(null);
+    setActiveToolDefinitions(null);
+    setActiveToolsError(null);
+    setToolsLoadingConnectionID("");
+  }
+
+  async function handleConnectionInspect(connection: Connection) {
+    if (!token || !isInspectableConnection(connection)) {
+      return;
+    }
+
+    const requestID = toolRequestRef.current + 1;
+    toolRequestRef.current = requestID;
+    setActiveToolsConnection(connection);
+    setActiveToolDefinitions(null);
+    setActiveToolsError(null);
+    setToolsLoadingConnectionID(connection.id);
+
+    try {
+      const result = await apiRequest<ConnectionToolsResponse>(`/api/connections/${connection.id}/tools`, {
+        method: "GET",
+        token,
+      });
+      if (toolRequestRef.current !== requestID) {
+        return;
+      }
+      setActiveToolsConnection(result.connection);
+      setActiveToolDefinitions(result.tools);
+    } catch (inspectError) {
+      if (toolRequestRef.current !== requestID) {
+        return;
+      }
+      setActiveToolsError(getErrorMessage(inspectError));
+    } finally {
+      if (toolRequestRef.current === requestID) {
+        setToolsLoadingConnectionID("");
+      }
+    }
   }
 
   if (!hydrated) {
@@ -446,7 +517,23 @@ export function AppShell() {
                 <div className="empty">No MCP servers connected yet.</div>
               ) : (
                 bootstrap.connections.map((connection) => (
-                  <article className="connection-card" key={connection.id}>
+                  <article
+                    className={`connection-card ${isInspectableConnection(connection) ? "interactive" : ""}`}
+                    key={connection.id}
+                    role={isInspectableConnection(connection) ? "button" : undefined}
+                    tabIndex={isInspectableConnection(connection) ? 0 : undefined}
+                    aria-busy={toolsLoadingConnectionID === connection.id}
+                    onClick={() => void handleConnectionInspect(connection)}
+                    onKeyDown={(event) => {
+                      if (!isInspectableConnection(connection)) {
+                        return;
+                      }
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        void handleConnectionInspect(connection);
+                      }
+                    }}
+                  >
                     <div className="status-row">
                       <h3>{connection.name}</h3>
                       <span className={`badge ${connection.status}`}>{connection.status}</span>
@@ -455,6 +542,13 @@ export function AppShell() {
                     {connection.last_error ? <p className="tiny">{connection.last_error}</p> : null}
                     {connection.scopes.length > 0 ? (
                       <p className="tiny">Scopes: {connection.scopes.join(", ")}</p>
+                    ) : null}
+                    {isInspectableConnection(connection) ? (
+                      <p className="tiny">
+                        {toolsLoadingConnectionID === connection.id
+                          ? "Loading tool definitions..."
+                          : "Click to inspect tool definitions."}
+                      </p>
                     ) : null}
                     {connection.auth_required && connection.status !== "connected" ? (
                       <div className="actions">
@@ -527,6 +621,38 @@ export function AppShell() {
           </form>
         </section>
       </div>
+      {activeToolsConnection ? (
+        <div className="modal-backdrop" role="presentation" onClick={closeToolDefinitionsModal}>
+          <section
+            className="modal panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="tool-definitions-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="modal-header">
+              <div>
+                <p className="eyebrow">Tool Definitions</p>
+                <h2 id="tool-definitions-title" className="title modal-title">
+                  {activeToolsConnection.name}
+                </h2>
+                <p className="subtitle modal-subtitle">{activeToolsConnection.endpoint}</p>
+              </div>
+              <button className="button ghost" type="button" onClick={closeToolDefinitionsModal}>
+                Close
+              </button>
+            </header>
+            <div className="modal-body">
+              {activeToolsError ? <div className="error-box">{activeToolsError}</div> : null}
+              {activeToolsError ? null : activeToolDefinitions ? (
+                <pre className="json-view">{JSON.stringify(activeToolDefinitions, null, 2)}</pre>
+              ) : (
+                <div className="empty">Loading tool definitions...</div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </main>
   );
 }
@@ -544,6 +670,10 @@ function openPopup(url: string) {
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected error";
+}
+
+function isInspectableConnection(connection: Connection): boolean {
+  return connection.status === "connected";
 }
 
 function formatTimestamp(value: string): string {

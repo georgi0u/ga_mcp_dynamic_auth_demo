@@ -17,7 +17,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type Manager struct {
+type Client struct {
 	publicBaseURL string
 	httpClient    *http.Client
 }
@@ -104,14 +104,14 @@ type tokenResponse struct {
 func New(
 	publicBaseURL string,
 	timeout time.Duration,
-) *Manager {
-	return &Manager{
+) *Client {
+	return &Client{
 		publicBaseURL: strings.TrimRight(publicBaseURL, "/"),
 		httpClient:    &http.Client{Timeout: timeout},
 	}
 }
 
-func (m *Manager) PrepareServer(
+func (m *Client) PrepareServer(
 	ctx context.Context,
 	endpoint string,
 ) (*ServerDefinition, error) {
@@ -148,7 +148,7 @@ func (m *Manager) PrepareServer(
 	return server, nil
 }
 
-func (m *Manager) BeginAuthorization(
+func (m *Client) BeginAuthorization(
 	ctx context.Context,
 	server ServerDefinition,
 	scopes []string,
@@ -186,7 +186,7 @@ func (m *Manager) BeginAuthorization(
 	return m.beginAuthorization(ctx, normalizedServer, resourceMetadata, scopes)
 }
 
-func (m *Manager) beginAuthorization(
+func (m *Client) beginAuthorization(
 	ctx context.Context,
 	server ServerDefinition,
 	resourceMetadata *protectedResourceMetadata,
@@ -254,7 +254,7 @@ func (m *Manager) beginAuthorization(
 	}, nil
 }
 
-func (m *Manager) ExchangeAuthorizationCode(
+func (m *Client) ExchangeAuthorizationCode(
 	ctx context.Context,
 	session SessionDefinition,
 	redirectURI string,
@@ -276,82 +276,7 @@ func (m *Manager) ExchangeAuthorizationCode(
 	return m.doTokenRequest(ctx, normalizedSession, values)
 }
 
-func (m *Manager) ListTools(
-	ctx context.Context,
-	session SessionDefinition,
-) ([]*mcp.Tool, *TokenSet, error) {
-	var tools []*mcp.Tool
-	refreshedTokens, err := m.withSession(
-		ctx,
-		session,
-		func(session *mcp.ClientSession) error {
-			result, err := session.ListTools(ctx, &mcp.ListToolsParams{})
-			if err != nil {
-				return err
-			}
-			tools = result.Tools
-			return nil
-		},
-	)
-	if err != nil {
-		return nil, refreshedTokens, err
-	}
-	return tools, refreshedTokens, nil
-}
-
-func (m *Manager) CallTool(
-	ctx context.Context,
-	session SessionDefinition,
-	toolName string,
-	args map[string]any,
-) (string, *TokenSet, error) {
-	var callResult *mcp.CallToolResult
-	refreshedTokens, err := m.withSession(
-		ctx,
-		session,
-		func(session *mcp.ClientSession) error {
-			result, err := session.CallTool(ctx, &mcp.CallToolParams{
-				Name:      toolName,
-				Arguments: args,
-			})
-			if err != nil {
-				return err
-			}
-			callResult = result
-			return nil
-		},
-	)
-	if err != nil {
-		return "", refreshedTokens, err
-	}
-
-	payload := map[string]any{"is_error": callResult.IsError}
-	if callResult.StructuredContent != nil {
-		payload["structured"] = callResult.StructuredContent
-	}
-
-	content := make([]string, 0, len(callResult.Content))
-	for _, item := range callResult.Content {
-		switch typed := item.(type) {
-		case *mcp.TextContent:
-			content = append(content, typed.Text)
-		default:
-			raw, _ := json.Marshal(typed)
-			content = append(content, string(raw))
-		}
-	}
-	if len(content) > 0 {
-		payload["content"] = content
-	}
-
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return "", refreshedTokens, fmt.Errorf("marshal tool payload: %w", err)
-	}
-	return string(raw), refreshedTokens, nil
-}
-
-func (m *Manager) withSession(
+func (m *Client) withSession(
 	ctx context.Context,
 	session SessionDefinition,
 	fn func(session *mcp.ClientSession) error,
@@ -452,7 +377,7 @@ func shouldFallbackToLegacySSE(
 		strings.Contains(message, http.StatusText(http.StatusMethodNotAllowed))
 }
 
-func (m *Manager) transportHTTPClient(
+func (m *Client) transportHTTPClient(
 	ctx context.Context,
 	session SessionDefinition,
 ) (*http.Client, *TokenSet, error) {
@@ -475,7 +400,7 @@ func (m *Manager) transportHTTPClient(
 	}, refreshedTokens, nil
 }
 
-func (m *Manager) ensureAccessToken(
+func (m *Client) ensureAccessToken(
 	ctx context.Context,
 	session SessionDefinition,
 ) (string, *TokenSet, error) {
@@ -499,7 +424,7 @@ func (m *Manager) ensureAccessToken(
 	return tokenSet.AccessToken, tokenSet, nil
 }
 
-func (m *Manager) refreshAccessToken(
+func (m *Client) refreshAccessToken(
 	ctx context.Context,
 	session SessionDefinition,
 ) (*TokenSet, error) {
@@ -511,7 +436,7 @@ func (m *Manager) refreshAccessToken(
 	return m.doTokenRequest(ctx, session, values)
 }
 
-func (m *Manager) doTokenRequest(
+func (m *Client) doTokenRequest(
 	ctx context.Context,
 	session SessionDefinition,
 	values url.Values,
@@ -579,7 +504,7 @@ func (m *Manager) doTokenRequest(
 	}, nil
 }
 
-func (m *Manager) dynamicRegisterClient(
+func (m *Client) dynamicRegisterClient(
 	ctx context.Context,
 	server ServerDefinition,
 ) (clientRegistrationResponse, error) {
@@ -643,7 +568,7 @@ func (m *Manager) dynamicRegisterClient(
 	return registration, nil
 }
 
-func (m *Manager) fetchAuthorizationServerMetadata(
+func (m *Client) fetchAuthorizationServerMetadata(
 	ctx context.Context,
 	issuer string,
 ) (*authorizationServerMetadata, error) {
@@ -682,7 +607,7 @@ func (m *Manager) fetchAuthorizationServerMetadata(
 	return &metadata, nil
 }
 
-func (m *Manager) discoverProtectedResource(
+func (m *Client) discoverProtectedResource(
 	ctx context.Context,
 	endpoint string,
 ) (string, *protectedResourceMetadata, error) {
@@ -725,7 +650,7 @@ func (m *Manager) discoverProtectedResource(
 	return metadataURL, resourceMetadata, nil
 }
 
-func (m *Manager) fetchProtectedResourceMetadata(
+func (m *Client) fetchProtectedResourceMetadata(
 	ctx context.Context,
 	metadataURL string,
 ) (*protectedResourceMetadata, error) {
@@ -814,7 +739,7 @@ func authorizationServerMetadataURL(
 	return wellKnown.String(), nil
 }
 
-func (m *Manager) normalizeServerDefinition(
+func (m *Client) normalizeServerDefinition(
 	server ServerDefinition,
 ) (ServerDefinition, error) {
 	normalizedEndpoint, err := normalizeEndpoint(server.Endpoint)
@@ -838,7 +763,7 @@ func (m *Manager) normalizeServerDefinition(
 	return server, nil
 }
 
-func (m *Manager) normalizeSessionDefinition(
+func (m *Client) normalizeSessionDefinition(
 	session SessionDefinition,
 ) (SessionDefinition, error) {
 	server, err := m.normalizeServerDefinition(session.Server)
