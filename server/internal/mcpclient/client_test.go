@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,6 +185,347 @@ func TestDynamicRegisterClientOmitsScope(t *testing.T) {
 	}
 	if captured.Scope != "" {
 		t.Fatalf("expected registration scope to be empty, got %q", captured.Scope)
+	}
+}
+
+func TestBeginAuthorizationReRegistersWhenIssuerChanges(t *testing.T) {
+	t.Parallel()
+
+	var registrationCalls int
+	var httpServer *httptest.Server
+	httpServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set(
+				"WWW-Authenticate",
+				`Bearer realm="example", resource_metadata="`+httpServer.URL+`/resource-metadata"`,
+			)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/resource-metadata":
+			writeJSON(t, w, protectedResourceMetadata{
+				Resource:             httpServer.URL + "/mcp",
+				AuthorizationServers: []string{httpServer.URL + "/issuer-b"},
+			})
+		case mustAuthorizationServerMetadataPath(t, httpServer.URL+"/issuer-b"):
+			writeJSON(t, w, authorizationServerMetadata{
+				Issuer:                httpServer.URL + "/issuer-b",
+				AuthorizationEndpoint: httpServer.URL + "/issuer-b/authorize",
+				TokenEndpoint:         httpServer.URL + "/issuer-b/token",
+				RegistrationEndpoint:  httpServer.URL + "/issuer-b/register",
+			})
+		case "/issuer-b/register":
+			registrationCalls++
+			writeJSON(t, w, clientRegistrationResponse{
+				ClientID:                "new-client",
+				TokenEndpointAuthMethod: "none",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	manager := &Client{
+		publicBaseURL: "http://localhost:8080",
+		httpClient:    httpServer.Client(),
+	}
+
+	result, err := manager.BeginAuthorization(context.Background(), ServerDefinition{
+		Endpoint:                     httpServer.URL + "/mcp",
+		CanonicalResource:            httpServer.URL + "/mcp",
+		AuthRequired:                 true,
+		ProtectedResourceMetadataURL: httpServer.URL + "/resource-metadata",
+		AuthorizationServerIssuer:    httpServer.URL + "/issuer-a",
+		ClientID:                     "old-client",
+		ClientSecret:                 "old-secret",
+		TokenEndpointAuthMethod:      "client_secret_basic",
+	}, []string{"openid"})
+	if err != nil {
+		t.Fatalf("BeginAuthorization returned error: %v", err)
+	}
+
+	if registrationCalls != 1 {
+		t.Fatalf("expected 1 dynamic registration, got %d", registrationCalls)
+	}
+	if result.Server.AuthorizationServerIssuer != httpServer.URL+"/issuer-b" {
+		t.Fatalf("expected issuer %q, got %q", httpServer.URL+"/issuer-b", result.Server.AuthorizationServerIssuer)
+	}
+	if result.Server.ClientID != "new-client" {
+		t.Fatalf("expected re-registered client_id new-client, got %q", result.Server.ClientID)
+	}
+	if result.Server.ClientSecret != "" {
+		t.Fatalf("expected old client secret to be cleared, got %q", result.Server.ClientSecret)
+	}
+	if !result.Server.ReplaceClientCredentials {
+		t.Fatalf("expected client credentials to be replaced")
+	}
+
+	parsed, err := url.Parse(result.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("parse authorization URL: %v", err)
+	}
+	if got := parsed.Query().Get("client_id"); got != "new-client" {
+		t.Fatalf("expected authorization URL client_id new-client, got %q", got)
+	}
+}
+
+func TestBeginAuthorizationKeepsPortableClientIDWhenIssuerChanges(t *testing.T) {
+	t.Parallel()
+
+	var registrationCalls int
+	var httpServer *httptest.Server
+	httpServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set(
+				"WWW-Authenticate",
+				`Bearer realm="example", resource_metadata="`+httpServer.URL+`/resource-metadata"`,
+			)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/resource-metadata":
+			writeJSON(t, w, protectedResourceMetadata{
+				Resource:             httpServer.URL + "/mcp",
+				AuthorizationServers: []string{httpServer.URL + "/issuer-b"},
+			})
+		case mustAuthorizationServerMetadataPath(t, httpServer.URL+"/issuer-b"):
+			writeJSON(t, w, authorizationServerMetadata{
+				Issuer:                httpServer.URL + "/issuer-b",
+				AuthorizationEndpoint: httpServer.URL + "/issuer-b/authorize",
+				TokenEndpoint:         httpServer.URL + "/issuer-b/token",
+				RegistrationEndpoint:  httpServer.URL + "/issuer-b/register",
+			})
+		case "/issuer-b/register":
+			registrationCalls++
+			writeJSON(t, w, clientRegistrationResponse{
+				ClientID:                "unexpected-client",
+				TokenEndpointAuthMethod: "none",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	manager := &Client{
+		publicBaseURL: "http://localhost:8080",
+		httpClient:    httpServer.Client(),
+	}
+
+	const portableClientID = "https://client.example/metadata.json"
+	result, err := manager.BeginAuthorization(context.Background(), ServerDefinition{
+		Endpoint:                     httpServer.URL + "/mcp",
+		CanonicalResource:            httpServer.URL + "/mcp",
+		AuthRequired:                 true,
+		ProtectedResourceMetadataURL: httpServer.URL + "/resource-metadata",
+		AuthorizationServerIssuer:    httpServer.URL + "/issuer-a",
+		ClientID:                     portableClientID,
+		TokenEndpointAuthMethod:      "none",
+	}, []string{"openid"})
+	if err != nil {
+		t.Fatalf("BeginAuthorization returned error: %v", err)
+	}
+
+	if registrationCalls != 0 {
+		t.Fatalf("expected no dynamic registration for portable client_id, got %d", registrationCalls)
+	}
+	if result.Server.AuthorizationServerIssuer != httpServer.URL+"/issuer-b" {
+		t.Fatalf("expected issuer %q, got %q", httpServer.URL+"/issuer-b", result.Server.AuthorizationServerIssuer)
+	}
+	if result.Server.ClientID != portableClientID {
+		t.Fatalf("expected portable client_id %q, got %q", portableClientID, result.Server.ClientID)
+	}
+	if result.Server.ReplaceClientCredentials {
+		t.Fatalf("expected portable client_id to be reused without replacement")
+	}
+}
+
+func TestBeginAuthorizationErrorsWhenIssuerChangesWithoutDynamicRegistration(t *testing.T) {
+	t.Parallel()
+
+	var registrationCalls int
+	var httpServer *httptest.Server
+	httpServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set(
+				"WWW-Authenticate",
+				`Bearer realm="example", resource_metadata="`+httpServer.URL+`/resource-metadata"`,
+			)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/resource-metadata":
+			writeJSON(t, w, protectedResourceMetadata{
+				Resource:             httpServer.URL + "/mcp",
+				AuthorizationServers: []string{httpServer.URL + "/issuer-b"},
+			})
+		case mustAuthorizationServerMetadataPath(t, httpServer.URL+"/issuer-b"):
+			writeJSON(t, w, authorizationServerMetadata{
+				Issuer:                httpServer.URL + "/issuer-b",
+				AuthorizationEndpoint: httpServer.URL + "/issuer-b/authorize",
+				TokenEndpoint:         httpServer.URL + "/issuer-b/token",
+			})
+		case "/issuer-b/register":
+			registrationCalls++
+			http.Error(w, "unexpected registration", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	manager := &Client{
+		publicBaseURL: "http://localhost:8080",
+		httpClient:    httpServer.Client(),
+	}
+
+	_, err := manager.BeginAuthorization(context.Background(), ServerDefinition{
+		Endpoint:                     httpServer.URL + "/mcp",
+		CanonicalResource:            httpServer.URL + "/mcp",
+		AuthRequired:                 true,
+		ProtectedResourceMetadataURL: httpServer.URL + "/resource-metadata",
+		AuthorizationServerIssuer:    httpServer.URL + "/issuer-a",
+		ClientID:                     "old-client",
+	}, []string{"openid"})
+	if err == nil {
+		t.Fatalf("expected BeginAuthorization to fail when issuer changes without dynamic registration")
+	}
+	if !strings.Contains(err.Error(), "stored client credentials cannot be reused") {
+		t.Fatalf("expected issuer change error, got %v", err)
+	}
+	if registrationCalls != 0 {
+		t.Fatalf("expected no dynamic registration attempts, got %d", registrationCalls)
+	}
+}
+
+func TestBeginAuthorizationKeepsStoredIssuerWhenStillAdvertised(t *testing.T) {
+	t.Parallel()
+
+	var registrationCalls int
+	var httpServer *httptest.Server
+	httpServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/mcp":
+			w.Header().Set(
+				"WWW-Authenticate",
+				`Bearer realm="example", resource_metadata="`+httpServer.URL+`/resource-metadata"`,
+			)
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/resource-metadata":
+			writeJSON(t, w, protectedResourceMetadata{
+				Resource: httpServer.URL + "/mcp",
+				AuthorizationServers: []string{
+					httpServer.URL + "/issuer-b",
+					httpServer.URL + "/issuer-a",
+				},
+			})
+		case mustAuthorizationServerMetadataPath(t, httpServer.URL+"/issuer-a"):
+			writeJSON(t, w, authorizationServerMetadata{
+				Issuer:                httpServer.URL + "/issuer-a",
+				AuthorizationEndpoint: httpServer.URL + "/issuer-a/authorize",
+				TokenEndpoint:         httpServer.URL + "/issuer-a/token",
+			})
+		case mustAuthorizationServerMetadataPath(t, httpServer.URL+"/issuer-b"):
+			writeJSON(t, w, authorizationServerMetadata{
+				Issuer:                httpServer.URL + "/issuer-b",
+				AuthorizationEndpoint: httpServer.URL + "/issuer-b/authorize",
+				TokenEndpoint:         httpServer.URL + "/issuer-b/token",
+				RegistrationEndpoint:  httpServer.URL + "/issuer-b/register",
+			})
+		case "/issuer-b/register":
+			registrationCalls++
+			writeJSON(t, w, clientRegistrationResponse{
+				ClientID:                "unexpected-client",
+				TokenEndpointAuthMethod: "none",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	manager := &Client{
+		publicBaseURL: "http://localhost:8080",
+		httpClient:    httpServer.Client(),
+	}
+
+	result, err := manager.BeginAuthorization(context.Background(), ServerDefinition{
+		Endpoint:                     httpServer.URL + "/mcp",
+		CanonicalResource:            httpServer.URL + "/mcp",
+		AuthRequired:                 true,
+		ProtectedResourceMetadataURL: httpServer.URL + "/resource-metadata",
+		AuthorizationServerIssuer:    httpServer.URL + "/issuer-a",
+		ClientID:                     "old-client",
+		TokenEndpointAuthMethod:      "none",
+	}, []string{"openid"})
+	if err != nil {
+		t.Fatalf("BeginAuthorization returned error: %v", err)
+	}
+
+	if registrationCalls != 0 {
+		t.Fatalf("expected stored issuer to be reused without re-registration, got %d registrations", registrationCalls)
+	}
+	if result.Server.AuthorizationServerIssuer != httpServer.URL+"/issuer-a" {
+		t.Fatalf("expected issuer %q, got %q", httpServer.URL+"/issuer-a", result.Server.AuthorizationServerIssuer)
+	}
+	if result.Server.ClientID != "old-client" {
+		t.Fatalf("expected existing client_id to be preserved, got %q", result.Server.ClientID)
+	}
+}
+
+func TestFetchAuthorizationServerMetadataRejectsIssuerMismatch(t *testing.T) {
+	t.Parallel()
+
+	var httpServer *httptest.Server
+	httpServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case mustAuthorizationServerMetadataPath(t, httpServer.URL+"/issuer-a"):
+			writeJSON(t, w, authorizationServerMetadata{
+				Issuer:                httpServer.URL + "/issuer-b",
+				AuthorizationEndpoint: httpServer.URL + "/issuer-a/authorize",
+				TokenEndpoint:         httpServer.URL + "/issuer-a/token",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpServer.Close()
+
+	manager := &Client{
+		httpClient: httpServer.Client(),
+	}
+
+	_, err := manager.fetchAuthorizationServerMetadata(
+		context.Background(),
+		httpServer.URL+"/issuer-a",
+	)
+	if err == nil {
+		t.Fatalf("expected issuer mismatch error")
+	}
+	if !strings.Contains(err.Error(), "issuer mismatch") {
+		t.Fatalf("expected issuer mismatch error, got %v", err)
+	}
+}
+
+func mustAuthorizationServerMetadataPath(t *testing.T, issuer string) string {
+	t.Helper()
+
+	metadataURL, err := authorizationServerMetadataURL(issuer)
+	if err != nil {
+		t.Fatalf("authorizationServerMetadataURL(%q) returned error: %v", issuer, err)
+	}
+
+	parsed, err := url.Parse(metadataURL)
+	if err != nil {
+		t.Fatalf("parse metadata URL %q: %v", metadataURL, err)
+	}
+	return parsed.Path
+}
+
+func writeJSON(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Fatalf("encode json response: %v", err)
 	}
 }
 

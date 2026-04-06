@@ -34,6 +34,7 @@ type ServerDefinition struct {
 	ClientID                     string
 	ClientSecret                 string
 	TokenEndpointAuthMethod      string
+	ReplaceClientCredentials     bool
 }
 
 type SessionDefinition struct {
@@ -111,6 +112,9 @@ func New(
 	}
 }
 
+// Given an MCP server endpoint, discover the server's protected resource metadata if any,
+// and return a structured ServerDefinition that can be used for subsequent interactions with the
+// server.
 func (m *Client) PrepareServer(
 	ctx context.Context,
 	endpoint string,
@@ -148,6 +152,10 @@ func (m *Client) PrepareServer(
 	return server, nil
 }
 
+// Begin the auth handshake on behalf of a user.
+// Returns a structured response, containing the URL and metadata required to start the authorization process.
+// The user visits the URL and completes the authorization process, which results in an authorization code
+// that can be exchanged for bearer tokens.
 func (m *Client) BeginAuthorization(
 	ctx context.Context,
 	server ServerDefinition,
@@ -158,30 +166,16 @@ func (m *Client) BeginAuthorization(
 		return nil, err
 	}
 
-	resourceMetadata := &protectedResourceMetadata{
-		Resource:             normalizedServer.CanonicalResource,
-		AuthorizationServers: []string{normalizedServer.AuthorizationServerIssuer},
-		ScopesSupported:      sanitizeScopes(scopes),
+	metadataURL, resourceMetadata, err := m.currentProtectedResourceMetadata(
+		ctx,
+		normalizedServer,
+		scopes,
+	)
+	if err != nil {
+		return nil, err
 	}
-	if normalizedServer.ProtectedResourceMetadataURL == "" ||
-		normalizedServer.AuthorizationServerIssuer == "" {
-		metadataURL, metadata, err := m.discoverProtectedResource(
-			ctx,
-			normalizedServer.Endpoint,
-		)
-		if err != nil {
-			return nil, err
-		}
-		if metadata == nil {
-			return nil, fmt.Errorf(
-				"server %q does not advertise an authorization server",
-				normalizedServer.Endpoint,
-			)
-		}
-		normalizedServer.AuthRequired = true
-		normalizedServer.ProtectedResourceMetadataURL = metadataURL
-		resourceMetadata = metadata
-	}
+	normalizedServer.AuthRequired = true
+	normalizedServer.ProtectedResourceMetadataURL = metadataURL
 
 	return m.beginAuthorization(ctx, normalizedServer, resourceMetadata, scopes)
 }
@@ -192,10 +186,15 @@ func (m *Client) beginAuthorization(
 	resourceMetadata *protectedResourceMetadata,
 	explicitScopes []string,
 ) (*AuthorizationResult, error) {
-	issuer := server.AuthorizationServerIssuer
-	if issuer == "" && len(resourceMetadata.AuthorizationServers) > 0 {
-		issuer = resourceMetadata.AuthorizationServers[0]
+	if resourceMetadata == nil {
+		return nil, fmt.Errorf("protected resource metadata is required")
 	}
+
+	storedIssuer := server.AuthorizationServerIssuer
+	issuer := chooseAuthorizationServerIssuer(
+		storedIssuer,
+		resourceMetadata.AuthorizationServers,
+	)
 	if issuer == "" {
 		return nil, fmt.Errorf("no authorization server advertised by %s", server.Endpoint)
 	}
@@ -204,6 +203,11 @@ func (m *Client) beginAuthorization(
 	if err != nil {
 		return nil, err
 	}
+	if authMetadata.Issuer != "" {
+		issuer = authMetadata.Issuer
+	}
+
+	issuerChanged := hasIssuerChanged(storedIssuer, issuer)
 	server.AuthRequired = true
 	server.AuthorizationServerIssuer = issuer
 	server.AuthorizationEndpoint = authMetadata.AuthorizationEndpoint
@@ -214,6 +218,19 @@ func (m *Client) beginAuthorization(
 		scopes = sanitizeScopes(resourceMetadata.ScopesSupported)
 	}
 
+	if issuerChanged && server.ClientID != "" && !isPortableClientID(server.ClientID) {
+		if server.RegistrationEndpoint == "" {
+			return nil, fmt.Errorf(
+				"authorization server changed from %s to %s; stored client credentials cannot be reused and the new authorization server does not support dynamic client registration",
+				storedIssuer,
+				issuer,
+			)
+		}
+		server.ClientID = ""
+		server.ClientSecret = ""
+		server.TokenEndpointAuthMethod = ""
+	}
+
 	if server.ClientID == "" {
 		registration, err := m.dynamicRegisterClient(ctx, server)
 		if err != nil {
@@ -222,12 +239,15 @@ func (m *Client) beginAuthorization(
 		server.ClientID = registration.ClientID
 		server.ClientSecret = registration.ClientSecret
 		server.TokenEndpointAuthMethod = registration.TokenEndpointAuthMethod
+		server.ReplaceClientCredentials = true
 	}
 	if server.TokenEndpointAuthMethod == "" {
 		server.TokenEndpointAuthMethod = "none"
 	}
 
 	redirectURI := m.publicBaseURL + "/oauth/callback"
+	// Nonces for replay-attach protection. Auth server will reject requests that don't have these,
+	// or that reuse them.
 	verifier := randomURLSafe(48)
 	state := randomURLSafe(32)
 
@@ -254,6 +274,48 @@ func (m *Client) beginAuthorization(
 	}, nil
 }
 
+func (m *Client) currentProtectedResourceMetadata(
+	ctx context.Context,
+	server ServerDefinition,
+	scopes []string,
+) (string, *protectedResourceMetadata, error) {
+	metadataURL, metadata, err := m.discoverProtectedResource(ctx, server.Endpoint)
+	if err != nil {
+		return "", nil, err
+	}
+	if metadata != nil {
+		return metadataURL, metadata, nil
+	}
+
+	if server.ProtectedResourceMetadataURL != "" {
+		metadata, err := m.fetchProtectedResourceMetadata(
+			ctx,
+			server.ProtectedResourceMetadataURL,
+		)
+		if err != nil {
+			return "", nil, err
+		}
+		return server.ProtectedResourceMetadataURL, metadata, nil
+	}
+
+	resourceMetadata := &protectedResourceMetadata{
+		Resource:        server.CanonicalResource,
+		ScopesSupported: sanitizeScopes(scopes),
+	}
+	if server.AuthorizationServerIssuer != "" {
+		resourceMetadata.AuthorizationServers = []string{server.AuthorizationServerIssuer}
+	}
+	if len(resourceMetadata.AuthorizationServers) == 0 {
+		return "", nil, fmt.Errorf(
+			"server %q does not advertise an authorization server",
+			server.Endpoint,
+		)
+	}
+	return "", resourceMetadata, nil
+}
+
+// Given an authorization code obtained from the authorization endpoint, exchange it for a bearer
+// token set that can be used to authorize requests to the MCP server.
 func (m *Client) ExchangeAuthorizationCode(
 	ctx context.Context,
 	session SessionDefinition,
@@ -601,6 +663,13 @@ func (m *Client) fetchAuthorizationServerMetadata(
 	if err := json.Unmarshal(body, &metadata); err != nil {
 		return nil, fmt.Errorf("decode auth metadata: %w", err)
 	}
+	if metadata.Issuer != "" && !sameIssuerIdentifier(metadata.Issuer, issuer) {
+		return nil, fmt.Errorf(
+			"authorization server metadata issuer mismatch: expected %s, got %s",
+			issuer,
+			metadata.Issuer,
+		)
+	}
 	if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
 		return nil, fmt.Errorf("authorization server metadata is incomplete")
 	}
@@ -757,10 +826,97 @@ func (m *Client) normalizeServerDefinition(
 
 	server.Endpoint = normalizedEndpoint
 	server.CanonicalResource = canonicalResource
+	server.ProtectedResourceMetadataURL = strings.TrimSpace(server.ProtectedResourceMetadataURL)
+	server.AuthorizationServerIssuer = strings.TrimSpace(server.AuthorizationServerIssuer)
+	server.AuthorizationEndpoint = strings.TrimSpace(server.AuthorizationEndpoint)
+	server.TokenEndpoint = strings.TrimSpace(server.TokenEndpoint)
+	server.RegistrationEndpoint = strings.TrimSpace(server.RegistrationEndpoint)
 	server.ClientID = strings.TrimSpace(server.ClientID)
 	server.ClientSecret = strings.TrimSpace(server.ClientSecret)
 	server.TokenEndpointAuthMethod = strings.TrimSpace(server.TokenEndpointAuthMethod)
 	return server, nil
+}
+
+func chooseAuthorizationServerIssuer(
+	stored string,
+	advertised []string,
+) string {
+	stored = strings.TrimSpace(stored)
+	for _, issuer := range advertised {
+		issuer = strings.TrimSpace(issuer)
+		if issuer == "" {
+			continue
+		}
+		if stored != "" && sameIssuerIdentifier(stored, issuer) {
+			return issuer
+		}
+	}
+	for _, issuer := range advertised {
+		issuer = strings.TrimSpace(issuer)
+		if issuer != "" {
+			return issuer
+		}
+	}
+	return stored
+}
+
+func hasIssuerChanged(
+	stored string,
+	current string,
+) bool {
+	stored = strings.TrimSpace(stored)
+	current = strings.TrimSpace(current)
+	if stored == "" || current == "" {
+		return false
+	}
+	return !sameIssuerIdentifier(stored, current)
+}
+
+func sameIssuerIdentifier(
+	left string,
+	right string,
+) bool {
+	leftNormalized, err := normalizeIssuerIdentifier(left)
+	if err != nil {
+		return false
+	}
+	rightNormalized, err := normalizeIssuerIdentifier(right)
+	if err != nil {
+		return false
+	}
+	return leftNormalized == rightNormalized
+}
+
+func normalizeIssuerIdentifier(
+	raw string,
+) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("issuer must be an absolute URL")
+	}
+	parsed.Fragment = ""
+	parsed.RawQuery = ""
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	if parsed.Path == "/" {
+		parsed.Path = ""
+	}
+	return parsed.String(), nil
+}
+
+func isPortableClientID(
+	clientID string,
+) bool {
+	parsed, err := url.Parse(strings.TrimSpace(clientID))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, "https") &&
+		parsed.Host != "" &&
+		parsed.Fragment == ""
 }
 
 func (m *Client) normalizeSessionDefinition(

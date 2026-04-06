@@ -542,8 +542,13 @@ func (s *Service) applyServerDefinition(
 	if definition.RegistrationEndpoint != "" {
 		server.RegistrationEndpoint = definition.RegistrationEndpoint
 	}
-	if definition.ClientID != "" {
+	if definition.ReplaceClientCredentials {
 		server.ClientID = definition.ClientID
+	} else if definition.ClientID != "" {
+		server.ClientID = definition.ClientID
+	}
+	if definition.ReplaceClientCredentials {
+		server.ClientSecretEnc = ""
 	}
 	if definition.ClientSecret != "" {
 		clientSecretEnc, err := s.crypto.EncryptString(definition.ClientSecret)
@@ -552,7 +557,9 @@ func (s *Service) applyServerDefinition(
 		}
 		server.ClientSecretEnc = clientSecretEnc
 	}
-	if definition.TokenEndpointAuthMethod != "" {
+	if definition.ReplaceClientCredentials {
+		server.TokenEndpointAuthMethod = definition.TokenEndpointAuthMethod
+	} else if definition.TokenEndpointAuthMethod != "" {
 		server.TokenEndpointAuthMethod = definition.TokenEndpointAuthMethod
 	}
 	return nil

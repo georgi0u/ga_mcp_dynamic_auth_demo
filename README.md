@@ -1,5 +1,10 @@
 # MCP Authorization Demo
 
+## Video Demonstration
+
+Check this video out to see me walk through some of what this does: 
+https://www.loom.com/share/be8bf2e202a44caab3763943bb8b7084
+
 ## Peter's Prompt
 
 > Grounded Agents Coding Project
@@ -57,9 +62,7 @@ The structure is as follows:
 5. Visit `http://localhost:3000/` to play with the demo app.
 
 
-## Background
-
-## OAuth and the MCP Auth Spec
+# OAuth and the MCP Auth Spec
 
 Let's assume the reader and I understand the more typical oauth use case. In summary, third parties and their 
 APIs are unique, and thus need to be integrated with individually before the client can do anything 
@@ -80,5 +83,111 @@ What happens if we remove the constraint of third-parties being unique? What if 
 servers implemented the same API, and a client wanted to offer integration with any of them, without knowing
 any of those third parties before hand? Sounds a lot like MCP.
 
+
+## Non-preregistered Client IDs
+
+If we know what a whole class of servers is going to look like, we want to be able to register against any of them,
+at runtime. How can we get a client id/relationship with the third party dynamically?
+
+The prompt asks for an implementation of Dynamic Client Registration, but that's not actually 
+recommended anymore. The recommended way is to have your client offer a persistent and widely 
+available "Client ID Metadata Document" that the third-party auth server can use to initialize a client id for a client,
+without extra steps/client-side maintenance.
+
+Here's what I've learned of each:
+
+## Dynamic Client Registration
+
+Dynamic Client Registration works as follows: 
+
+1. You assume the server does not require authentication and proceed..
+2. If a request fails for permissions, and the response includes a www-authenticate header,
+   which itself includes a resources_metadata URL. The data at that URL may include
+   metadata that allows for ± dynamically fetching a client id.
+3. You use that metadata to fetch a client_id (and client secret).
+4. You can now use that client metadata to do "typical" oauth handshakes on behalf of users, in order
+   to fetch access/refresh tokens. With those tokens in hand, you can talk to the third party 
+   server on behalf of the user.
+
+There are a few annoyances with this approach:
+
+1. The client needs to maintain code to fetch client ids.
+2. The client needs to persist client ids across all third-party servers.
+3. The client needs to maintain code to ensure previously fetched client ids are consistent with
+   the current auth server issuer. If the third party issuer changes, the client needs to detect that
+   and refetch a new client_id. See: https://modelcontextprotocol.io/specification/draft/basic/authorization#authorization-server-binding.
+    
+Compare that to Client ID Metadata Documents:
+
+### Client ID Metadata Document
+
+1. The client maintains public a server endpoint that hosts a piece of metadata describing the client
+   to all interested auth servers.
+2. The client doesn't need to establish a client_id, explicitly anymore. Instead, the client issues
+   the auth request for user access tokens, specifying the above URL as its client id.
+3. The auth server determines if its seen the client before, and hits the above URL. Or otherwise,
+   proceeds.
+
+In this world, a few things are improved:
+1. The auth issuer can then change, and the client doesn't need to know about it. The auth server can 
+establish a new internal representation of the client as it sees fit.
+2. The client doesn't need a pre-emptive handshake to establish a client_id.
+3. The client doesn't need to store third-party specific client_ids.
+
+However, this requires the client have a publicly accessible Client ID Document URL, which isn't
+ideal for a take-home assignment hosted on localhost 🙃
+
+
+
+# Implementation Explanation
+
+The files immediately relevant to the assignment are in the [mcpservice](./server/internal/mcpservice/)
+and [mcpclient](./server/internal/mcpclient/) go packages.
+
+* `mcpclient`: Minimal dependency client that can do: client id fetching, auth token fetching, 
+tool calls.
+* `mcpservice`: A wrapper around the client that persists client ids and auth tokens to postgres.
+
+I've annotated the above, inline in comments, explaining the implementation. 
+
+Everything else is for serving a toy app that uses the client.
+
+
+# Quirks
+
+A few things I had to intervene with:
+
+1. Codex initially tightly couple the data store and the client, which I felt went against the spirit
+   of both Peter's initial prompt to me and mine to it. I wanted the client to be as standalone as 
+   possible, and so had to (have codex) refactor.
+2. Codex also tied client ids to auth tokens (i.e. individual connections), such that every connection
+   had a new client_id. I believe this is a violation of the oauth spec, as each client application
+   is supposed to only have/use a single (valid) client_id. Even if it were allowed by the spec,
+   it's not ideal to have redundant client_ids per connection. Codex refactored this, after prompting.
+3. Initially only built out support for SSE style connections to MCP servers, when the new recommendation
+   is to use http streaming. Certain servers only support one or the other. Prompted codex to refactor.
+4. Codex didn't add validation to compare the stored issuer id, of an existing client_id, to the current
+   issuer defined by the auth server. The spec reads that if these two vary, you should either error 
+   or fetch a new client_id from the new issuer (and throw away the old one).
+5. Codex didn't initially add nonces to the auth request, which is required by the spec to prevent
+   replay attacks. Refactored.
+
+A few things I would do differently, but are prob. fine for a demo app:
+
+1. Both the `mcpclient` and `mcpservice` expose each step of the auth process as standalone
+   methods, to be called imperatively, at the application layer. I'd probably encapsulate this
+   a bit tighter, so as to not require callers to handle each step one by one. Allowing for 
+   individual calls provides more surface area for, e.g., handling the case where theres a 
+   preregistered client id, rolling things back conditionally, handling errors with more context
+   for where you are in the flow. That's a bit verbose for a demo app, but works well enough.
+2. I'm encrypting all of my sensitive data, in application code, and generally handling auth in-house.
+   I'd probably defer this to third-party tools (e.g. firebase auth). At minimum, my keys
+   would be in a secret manager, not env variables.
+3. The application server API is using a lot of standard library stuff, which is fine. I prefer
+   go's gin framework for writing http servers. A bit less verbose, more out of the box.
+4. The application server is managing database migrations inline. I'd decouple this to make
+   migrations safer. I'd also use an ORM rather than relying on inline-sql strings. (go-bun is nice.)
+5. I didn't look too deeply at the client side or conversation loop code. That's only there to 
+   demo the client.
 
 

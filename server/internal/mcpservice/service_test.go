@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/adamgeorgiou/mcp_auth/server/internal/cryptox"
 	"github.com/adamgeorgiou/mcp_auth/server/internal/mcpclient"
 	"github.com/adamgeorgiou/mcp_auth/server/internal/store"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -59,6 +60,44 @@ func TestListConnectionToolDefinitions(t *testing.T) {
 	}
 	if got := definition.Parameters["type"]; got != "object" {
 		t.Fatalf("expected parameters type object, got %#v", got)
+	}
+}
+
+func TestApplyServerDefinitionReplacesClientCredentials(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{
+		crypto: cryptox.New([]byte("0123456789abcdef0123456789abcdef")),
+	}
+
+	clientSecretEnc, err := service.crypto.EncryptString("old-secret")
+	if err != nil {
+		t.Fatalf("EncryptString returned error: %v", err)
+	}
+
+	server := &store.MCPServer{
+		ClientID:                "old-client",
+		ClientSecretEnc:         clientSecretEnc,
+		TokenEndpointAuthMethod: "client_secret_basic",
+	}
+
+	err = service.applyServerDefinition(server, mcpclient.ServerDefinition{
+		ClientID:                 "new-client",
+		TokenEndpointAuthMethod:  "none",
+		ReplaceClientCredentials: true,
+	})
+	if err != nil {
+		t.Fatalf("applyServerDefinition returned error: %v", err)
+	}
+
+	if server.ClientID != "new-client" {
+		t.Fatalf("expected client_id new-client, got %q", server.ClientID)
+	}
+	if server.ClientSecretEnc != "" {
+		t.Fatalf("expected client secret to be cleared, got %q", server.ClientSecretEnc)
+	}
+	if server.TokenEndpointAuthMethod != "none" {
+		t.Fatalf("expected token endpoint auth method none, got %q", server.TokenEndpointAuthMethod)
 	}
 }
 
