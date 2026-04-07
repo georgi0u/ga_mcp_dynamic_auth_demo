@@ -161,16 +161,17 @@ A few things I had to intervene with:
    of both Peter's initial prompt to me and mine to it. I wanted the client to be as standalone as 
    possible, and so had to (have codex) refactor.
 2. Codex also tied client ids to auth tokens (i.e. individual connections), such that every connection
-   had a new client_id. I believe this is a violation of the oauth spec, as each client application
-   is supposed to only have/use a single (valid) client_id. Even if it were allowed by the spec,
-   it's not ideal to have redundant client_ids per connection. Codex refactored this, after prompting.
+   had a new client_id. This is improper. The app should have one client id per mcp server auth server,
+   and should reuse that client id during subsequent interactions with the auth server (unless the 
+   issuer of the client id changes).
 3. Initially only built out support for SSE style connections to MCP servers, when the new recommendation
    is to use http streaming. Certain servers only support one or the other. Prompted codex to refactor.
 4. Codex didn't add validation to compare the stored issuer id, of an existing client_id, to the current
    issuer defined by the auth server. The spec reads that if these two vary, you should either error 
-   or fetch a new client_id from the new issuer (and throw away the old one).
-5. Codex didn't initially add nonces to the auth request, which is required by the spec to prevent
-   replay attacks. Refactored.
+   or fetch a new client_id from the new issuer (and throw away the old one) (in the dynamic case).s
+5. Codex didn't initially add PKCE or proper state handling to the auth flow. The MCP auth flow needs
+   PKCE for the authorization code exchange, and the client should also generate and verify state on
+   the callback to prevent callback forgery / request mixups. Refactored.
 
 A few things I would do differently, but are prob. fine for a demo app:
 
@@ -189,5 +190,4 @@ A few things I would do differently, but are prob. fine for a demo app:
    migrations safer. I'd also use an ORM rather than relying on inline-sql strings. (go-bun is nice.)
 5. I didn't look too deeply at the client side or conversation loop code. That's only there to 
    demo the client.
-
 
