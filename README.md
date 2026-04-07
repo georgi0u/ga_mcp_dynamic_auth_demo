@@ -54,7 +54,7 @@ The structure is as follows:
    * `cp ./client/.env.local.example ./client/.env.local`.
 2. Set backend env variables. 
    * `cp ./server/.env.example ./server/.env`. 
-   * You need to specify an OpenAI API key for the chat to work. Ping me if you need one.
+   * 👉 You need to specify an OpenAI API key for the chat to work. Ping me if you need one. 👈
 3. Ensure docker desktop is installed/running. 
    * https://www.docker.com/products/docker-desktop/
 4. Start the app.
@@ -136,8 +136,6 @@ establish a new internal representation of the client as it sees fit.
 
 However, this requires the client have a publicly accessible Client ID Document URL, which isn't
 ideal for a take-home assignment hosted on localhost 🙃
-
-
 
 # Implementation Explanation
 
